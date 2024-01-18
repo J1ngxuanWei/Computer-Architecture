@@ -1,0 +1,103 @@
+#include "cache.h"
+
+#define MAX_LRU_POS LLC_WAY
+#define BIMODAL_THRESH 6		// threshold: 6%
+
+extern Cache_pref_repla_union State_cache;
+
+void CACHE::llc_initialize_replacement()
+{
+    cout << "Initialize BIP state\n" << endl;
+
+	// LRU位初始化
+	for (uint32_t i=0; i<LLC_SET; i++) {
+		for (uint32_t j=0; j<LLC_WAY; j++) {
+				block[i][j].lru = MAX_LRU_POS;
+		}
+	}
+}
+
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{
+    if (hit && (type == WRITEBACK)) // WB不更新LRU位
+		return;
+	else if(hit){
+		// hit情况：promote towards MRU
+		if(block[set][way].lru > 0)
+			block[set][way].lru--;	
+	}
+}
+
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+    uint32_t way = 0, new_way = 0;
+
+    // fill invalid line first
+    for (way=0; way<LLC_WAY; way++) {
+        if (block[set][way].valid == false) {
+
+            DP ( if (warmup_complete[cpu]) {
+            cout << "[" << NAME << "] " << __func__ << " instr_id: " << instr_id << " invalid set: " << set << " way: " << way;
+            cout << hex << " address: " << (full_addr>>LOG2_BLOCK_SIZE) << " victim address: " << block[set][way].address << " data: " << block[set][way].data;
+            cout << dec << " lru: " << block[set][way].lru << endl; });
+
+            break;
+        }
+    }
+
+	// 没有空，则LRU
+	if(way == LLC_WAY){
+        for (way=0; way<LLC_WAY; way++) {
+            if (get_set(State_cache.recent_prefetch_addr)==set && get_way(State_cache.recent_prefetch_addr,set)==way)
+            {
+                //此时代表访问到了刚刚被prefetch进来的，那么降低被换出的优先级
+                block[set][way].lru = block[set][way].lru ? block[set][way].lru-1 : 0;
+                continue;
+            }
+            if (block[set][way].lru > block[set][new_way].lru) {
+				new_way = way;
+            }
+			DP ( if (warmup_complete[cpu]) {
+			cout << "[" << NAME << "] " << __func__ << " instr_id: " << instr_id << " replace set: " << set << " way: " << new_way;
+			cout << hex << " address: " << (full_addr>>LOG2_BLOCK_SIZE) << " victim address: " << block[set][new_way].address << " data: " << block[set][new_way].data;
+			cout << dec << " lru: " << block[set][new_way].lru << endl; });
+		}
+	}
+	else
+		new_way = way;
+    State_cache.recent_replace_set=set;
+    State_cache.recent_replace_way=way;
+
+    if(State_cache.data_access_state==3)
+    {
+        //此时为TIP模式，即随即无规律访问，应该采用MRU
+		block[set][new_way].lru = 0;
+    }
+    else if(State_cache.data_access_state==1)
+    {
+        //此时为CS模式，即固定步长访问，此时认为可能处于一个小循环访问中，因为其具有一定的规律性
+        //也可能是非循环中的相对稳定状态
+        //采用LRU策略
+		block[set][new_way].lru = MAX_LRU_POS;
+    }
+    else if(State_cache.data_access_state==2 || State_cache.data_access_state==0)
+    {
+        //此时为GS或CPLX模式
+        //特点是与IP无关的全局访问或是处于抖动下的访问，此时应该倾向于LRU，但也有一定的随机性，因此保留小概率的MRU
+        //采用原BIP策略
+	    // BIP策略：以6%的概率把该块放到MRU位；否则就放到LRU位(LIP策略)
+        if((rand() % 100) <= BIMODAL_THRESH)
+		    block[set][new_way].lru = 0;
+	    else
+		    block[set][new_way].lru = MAX_LRU_POS;
+    }
+    return new_way;
+}
+
+void CACHE::llc_replacement_final_stats()
+{
+
+}
+
+
+
